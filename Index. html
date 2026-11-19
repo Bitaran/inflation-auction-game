@@ -23,11 +23,10 @@ button:disabled{opacity:.5;cursor:not-allowed}
 .status{background:#edf3fa;padding:12px;border-radius:7px;margin:12px 0}
 .hidden{display:none}
 .muted{color:#65748b}
-.goods{display:grid;grid-template-columns:repeat(auto-fit,minmax(130px,1fr));gap:10px}
 footer{text-align:center;padding:25px;color:#718096}
+pre{white-space:pre-wrap;overflow-wrap:anywhere}
 </style>
 </head>
-
 <body>
 
 <header>
@@ -42,6 +41,7 @@ footer{text-align:center;padding:25px;color:#718096}
 <div id="roundStatus" class="status">Connecting to game...</div>
 <p id="budgetText" class="muted">Your virtual budget will appear here.</p>
 <p id="gameMessage" class="muted">Wait for your instructor to open the auction.</p>
+<button class="secondary" id="refreshGameButton">Refresh Game Status</button>
 </section>
 
 <section class="card" id="joinCard">
@@ -53,13 +53,13 @@ footer{text-align:center;padding:25px;color:#718096}
 
 <section class="card hidden" id="bidCard">
 <h2>Place Your Bid</h2>
-<p class="muted">Choose one item and submit your sealed bid.</p>
+<p class="muted">Choose one item and submit one sealed bid for this round.</p>
 
 <label for="goodSelect">Select an item</label>
 <select id="goodSelect"></select>
 
 <label for="bidAmount">Your bid ($)</label>
-<input id="bidAmount" type="number" min="0" step="1" placeholder="Enter amount">
+<input id="bidAmount" type="number" min="1" step="1" placeholder="Enter amount">
 
 <button id="bidButton">Submit Bid</button>
 <div id="bidMessage" class="status hidden"></div>
@@ -85,11 +85,18 @@ footer{text-align:center;padding:25px;color:#718096}
 
 <div id="instructorPanel" class="hidden">
 <h3>Game Controls</h3>
+
+<label for="roundSelect">Select auction round</label>
+<select id="roundSelect"></select>
+
 <div id="instructorStatus" class="status"></div>
-<button id="startRoundButton">Start Round</button>
-<button class="secondary" id="closeRoundButton">Close Round</button>
+
+<button id="startRoundButton">Open Selected Round</button>
+<button class="secondary" id="closeRoundButton">Close Selected Round</button>
 <button class="secondary" id="refreshResultsButton">Refresh Results</button>
-<pre id="results" style="white-space:pre-wrap;overflow-wrap:anywhere"></pre>
+
+<h3>Auction Results</h3>
+<pre id="results"></pre>
 </div>
 </section>
 
@@ -101,179 +108,377 @@ footer{text-align:center;padding:25px;color:#718096}
 /* SUPABASE CONFIGURATION */
 const SUPABASE_URL = "https://ubmazautxotaebousysc.supabase.co";
 const SUPABASE_KEY = "sb_publishable_EqWIEuoflBQ8_q-LycbVjA__OyySvHF";
-
 const FUNCTION_BASE = SUPABASE_URL + "/functions/v1/";
 
 let db = null;
 let currentRound = null;
+let currentRounds = [];
 let currentGoods = [];
 let studentSession = null;
-let instructorSession = null;
+let instructorPin = null;
 
 const $ = id => document.getElementById(id);
 
-function message(id,text){
-  $(id).textContent=text;
+function showMessage(id, text) {
+  $(id).textContent = text;
   $(id).classList.remove("hidden");
 }
 
-async function callFunction(name,payload,token){
-  const response=await fetch(FUNCTION_BASE+name,{
-    method:"POST",
-    headers:{
-      "Content-Type":"application/json",
-      "apikey":SUPABASE_KEY,
-      "Authorization":"Bearer "+(token||SUPABASE_KEY)
+async function callFunction(name, payload = {}) {
+  const response = await fetch(FUNCTION_BASE + name, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      "apikey": SUPABASE_KEY,
+      "Authorization": "Bearer " + SUPABASE_KEY
     },
-    body:JSON.stringify(payload||{})
+    body: JSON.stringify(payload)
   });
-  const data=await response.json().catch(()=>({}));
-  if(!response.ok) throw new Error(data.error||"Request failed");
+
+  const data = await response.json().catch(() => ({}));
+
+  if (!response.ok) {
+    throw new Error(data.error || "Request failed.");
+  }
+
   return data;
 }
 
-async function loadGame(){
-  try{
-    const {data:rounds,error:rError}=await db
-      .from("auction_rounds").select("*").order("round_number");
-    if(rError) throw rError;
+function selectedRoundId() {
+  return $("roundSelect").value;
+}
 
-    const {data:goods,error:gError}=await db
-      .from("auction_goods").select("*").order("name");
-    if(gError) throw gError;
+async function loadGame() {
+  try {
+    const { data: rounds, error: roundsError } = await db
+      .from("auction_rounds")
+      .select("*")
+      .order("round_number");
 
-    currentRound=rounds.find(r=>r.status==="open")||null;
-    currentGoods=goods||[];
+    if (roundsError) throw roundsError;
 
-    if(currentRound){
-      $("roundStatus").textContent="Round "+currentRound.round_number+" is OPEN";
-      $("budgetText").textContent="Your budget: $"+currentRound.student_budget;
-      $("gameMessage").textContent="Select one item and submit your bid.";
-      $("bidCard").classList.toggle("hidden",!studentSession);
-    }else{
-      $("roundStatus").textContent="No auction round is currently open.";
-      $("budgetText").textContent="Wait for your instructor.";
+    const { data: goods, error: goodsError } = await db
+      .from("auction_goods")
+      .select("*")
+      .order("name");
+
+    if (goodsError) throw goodsError;
+
+    currentRounds = rounds || [];
+    currentGoods = goods || [];
+    currentRound = currentRounds.find(r => r.status === "open") || null;
+
+    // Update instructor round selector.
+    const previousSelection = $("roundSelect").value;
+    $("roundSelect").innerHTML = "";
+
+    currentRounds.forEach(round => {
+      const option = document.createElement("option");
+      option.value = round.id;
+      option.textContent =
+        "Round " + round.round_number +
+        " — $" + round.student_budget +
+        " — " + round.status.toUpperCase();
+      $("roundSelect").appendChild(option);
+    });
+
+    if (currentRounds.some(r => String(r.id) === previousSelection)) {
+      $("roundSelect").value = previousSelection;
+    }
+
+    // Update student-facing status.
+    if (currentRound) {
+      $("roundStatus").textContent =
+        "Round " + currentRound.round_number + " is OPEN";
+
+      $("budgetText").textContent =
+        "Your virtual budget: $" + currentRound.student_budget;
+
+      $("gameMessage").textContent =
+        "Choose one item and submit your sealed bid.";
+
+      $("bidCard").classList.toggle("hidden", !studentSession);
+    } else {
+      $("roundStatus").textContent =
+        "No auction round is currently open.";
+
+      $("budgetText").textContent = "Wait for your instructor.";
+
+      $("gameMessage").textContent =
+        "The auction is currently closed.";
+
       $("bidCard").classList.add("hidden");
     }
 
-    $("goodSelect").innerHTML="";
-    currentGoods.forEach(g=>{
-      const option=document.createElement("option");
-      option.value=g.id;
-      option.textContent=g.name;
+    // Populate goods.
+    $("goodSelect").innerHTML = "";
+
+    currentGoods.forEach(good => {
+      const option = document.createElement("option");
+      option.value = good.id;
+      option.textContent = good.name;
       $("goodSelect").appendChild(option);
     });
 
-  }catch(e){
-    $("roundStatus").textContent="Could not connect to the game.";
-    console.error(e);
+    if (studentSession) {
+      $("joinCard").classList.add("hidden");
+      $("studentStatusCard").classList.remove("hidden");
+    }
+
+    if (instructorPin) {
+      updateInstructorStatus();
+    }
+
+  } catch (error) {
+    $("roundStatus").textContent =
+      "Could not connect to the game: " + error.message;
+
+    console.error(error);
   }
 }
 
-async function joinGame(){
-  const name=$("studentName").value.trim();
-  if(!name){alert("Enter your name.");return;}
+function updateInstructorStatus() {
+  const round = currentRounds.find(
+    r => String(r.id) === selectedRoundId()
+  );
 
-  $("joinButton").disabled=true;
-  try{
-    const result=await callFunction("student-register",{display_name:name});
-    studentSession=result;
-    sessionStorage.setItem("auctionStudentSession",JSON.stringify(result));
+  if (!round) {
+    $("instructorStatus").textContent = "No round selected.";
+    return;
+  }
+
+  $("instructorStatus").textContent =
+    "Selected: Round " + round.round_number +
+    " | Budget: $" + round.student_budget +
+    " | Status: " + round.status.toUpperCase();
+}
+
+async function joinGame() {
+  const name = $("studentName").value.trim();
+
+  if (name.length < 2) {
+    alert("Please enter a name with at least two characters.");
+    return;
+  }
+
+  $("joinButton").disabled = true;
+
+  try {
+    const result = await callFunction("student-register", {
+      display_name: name
+    });
+
+    studentSession = result;
+
+    sessionStorage.setItem(
+      "auctionStudentSession",
+      JSON.stringify(result)
+    );
+
     $("joinCard").classList.add("hidden");
     $("studentStatusCard").classList.remove("hidden");
-    $("studentStatus").textContent="You have joined the auction.";
+
+    $("studentStatus").textContent =
+      "Welcome, " + result.display_name + "! You have joined the auction.";
+
     await loadGame();
-  }catch(e){
-    alert(e.message);
-  }finally{
-    $("joinButton").disabled=false;
+
+  } catch (error) {
+    alert(error.message);
+  } finally {
+    $("joinButton").disabled = false;
   }
 }
 
-async function submitBid(){
-  if(!studentSession||!currentRound){
-    alert("Join when a round is open.");
+async function submitBid() {
+  if (!studentSession) {
+    alert("Please join the game first.");
     return;
   }
 
-  const amount=Number($("bidAmount").value);
-  const goodId=$("goodSelect").value;
-
-  if(!Number.isInteger(amount)||amount<0||amount>currentRound.student_budget){
-    alert("Enter a valid bid within your budget.");
+  if (!currentRound) {
+    alert("There is no open auction round.");
     return;
   }
 
-  $("bidButton").disabled=true;
-  try{
-    await callFunction("submit-bid",{
-      student_token:studentSession.access_token,
-      good_id:goodId,
-      bid_amount:amount
+  const amount = Number($("bidAmount").value);
+  const goodId = $("goodSelect").value;
+
+  if (
+    !Number.isInteger(amount) ||
+    amount <= 0 ||
+    amount > Number(currentRound.student_budget)
+  ) {
+    alert(
+      "Enter a whole-dollar bid between $1 and $" +
+      currentRound.student_budget + "."
+    );
+    return;
+  }
+
+  $("bidButton").disabled = true;
+
+  try {
+    await callFunction("submit-bid", {
+      access_token: studentSession.access_token,
+      round_id: currentRound.id,
+      good_id: goodId,
+      bid_amount: amount
     });
-    message("bidMessage","Your bid has been submitted!");
-    $("bidAmount").value="";
-    $("studentStatus").textContent="Bid submitted successfully.";
-  }catch(e){
-    message("bidMessage",e.message);
-  }finally{
-    $("bidButton").disabled=false;
+
+    showMessage("bidMessage", "Your bid has been submitted successfully!");
+
+    $("bidAmount").value = "";
+
+    $("studentStatus").textContent =
+      "Your bid for Round " + currentRound.round_number +
+      " has been submitted. You cannot submit another bid in this round.";
+
+  } catch (error) {
+    showMessage("bidMessage", error.message);
+  } finally {
+    $("bidButton").disabled = false;
   }
 }
 
-async function instructorLogin(){
-  try{
-    const result=await callFunction("instructor-login",{
-      pin:$("instructorPin").value
-    });
-    instructorSession=result;
+async function instructorLogin() {
+  $("instructorButton").disabled = true;
+
+  try {
+    const pin = $("instructorPin").value;
+
+    await callFunction("instructor-login", { pin });
+
+    // Keep PIN in memory only. It is not saved in local storage.
+    instructorPin = pin;
+
     $("instructorLogin").classList.add("hidden");
     $("instructorPanel").classList.remove("hidden");
-    $("instructorStatus").textContent="Instructor access granted.";
+
+    $("instructorStatus").textContent =
+      "Instructor access granted.";
+
+    await loadGame();
+    updateInstructorStatus();
     await refreshResults();
-  }catch(e){
-    message("instructorMessage",e.message);
+
+  } catch (error) {
+    showMessage("instructorMessage", error.message);
+  } finally {
+    $("instructorButton").disabled = false;
   }
 }
 
-async function instructorAction(action){
-  if(!instructorSession)return;
-  try{
-    await callFunction("instructor-control",{action},instructorSession.access_token);
+async function instructorAction(action) {
+  if (!instructorPin) {
+    alert("Please log in first.");
+    return;
+  }
+
+  const roundId = selectedRoundId();
+
+  if (!roundId) {
+    alert("Please select a round.");
+    return;
+  }
+
+  const actionText = action === "open" ? "open" : "close";
+
+  if (!confirm("Are you sure you want to " + actionText + " this round?")) {
+    return;
+  }
+
+  try {
+    await callFunction("instructor-control", {
+      pin: instructorPin,
+      round_id: roundId,
+      action: action
+    });
+
     await loadGame();
+    updateInstructorStatus();
     await refreshResults();
-  }catch(e){alert(e.message);}
+
+    alert("Round successfully " + actionText + "ed.");
+
+  } catch (error) {
+    alert(error.message);
+  }
 }
 
-async function refreshResults(){
-  if(!instructorSession)return;
-  try{
-    const data=await callFunction("instructor-results",{},instructorSession.access_token);
-    $("results").textContent=JSON.stringify(data,null,2);
-  }catch(e){$("results").textContent=e.message;}
+async function refreshResults() {
+  if (!instructorPin) return;
+
+  const roundId = selectedRoundId();
+
+  if (!roundId) {
+    $("results").textContent = "Select a round to view results.";
+    return;
+  }
+
+  try {
+    const data = await callFunction("instructor-results", {
+      pin: instructorPin,
+      round_id: roundId
+    });
+
+    $("results").textContent = JSON.stringify(data, null, 2);
+
+  } catch (error) {
+    $("results").textContent = error.message;
+  }
 }
 
-$("joinButton").addEventListener("click",joinGame);
-$("bidButton").addEventListener("click",submitBid);
-$("showInstructor").addEventListener("click",()=>{
+// Event listeners
+$("joinButton").addEventListener("click", joinGame);
+$("bidButton").addEventListener("click", submitBid);
+
+$("showInstructor").addEventListener("click", () => {
   $("instructorLogin").classList.toggle("hidden");
 });
-$("instructorButton").addEventListener("click",instructorLogin);
-$("startRoundButton").addEventListener("click",()=>instructorAction("start"));
-$("closeRoundButton").addEventListener("click",()=>instructorAction("close"));
-$("refreshResultsButton").addEventListener("click",refreshResults);
 
-try{
-  studentSession=JSON.parse(sessionStorage.getItem("auctionStudentSession")||"null");
-}catch(e){studentSession=null;}
+$("instructorButton").addEventListener("click", instructorLogin);
 
-if(SUPABASE_KEY.startsWith("sb_publishable_")){
-  db=window.supabase.createClient(SUPABASE_URL,SUPABASE_KEY);
-  loadGame();
-}else{
-  $("roundStatus").textContent="Supabase key has not been configured.";
+$("startRoundButton").addEventListener("click", () =>
+  instructorAction("open")
+);
+
+$("closeRoundButton").addEventListener("click", () =>
+  instructorAction("close")
+);
+
+$("refreshResultsButton").addEventListener("click", async () => {
+  await loadGame();
+  await refreshResults();
+});
+
+$("refreshGameButton").addEventListener("click", loadGame);
+
+$("roundSelect").addEventListener("change", async () => {
+  updateInstructorStatus();
+  await refreshResults();
+});
+
+// Restore student session.
+try {
+  studentSession = JSON.parse(
+    sessionStorage.getItem("auctionStudentSession") || "null"
+  );
+
+  if (studentSession) {
+    $("joinCard").classList.add("hidden");
+    $("studentStatusCard").classList.remove("hidden");
+    $("studentStatus").textContent =
+      "Welcome back, " + studentSession.display_name + ".";
+  }
+} catch (error) {
+  studentSession = null;
 }
-</script>
 
+// Initialize Supabase.
+db = window.supabase.createClient(SUPABASE_URL, SUPABASE_KEY);
+loadGame();
+
+</script>
 </body>
 </html>

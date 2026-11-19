@@ -1,0 +1,279 @@
+
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Inflation Auction Game | ECON 2301</title>
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+<style>
+*{box-sizing:border-box}
+body{margin:0;font-family:Arial,sans-serif;background:#f1f4f9;color:#202b3c}
+header{background:#172b4d;color:white;text-align:center;padding:28px 15px}
+header h1{margin:0 0 8px}
+header p{margin:0;color:#dce6f5}
+main{max-width:760px;margin:28px auto;padding:0 16px}
+.card{background:white;padding:23px;margin-bottom:18px;border-radius:12px;box-shadow:0 2px 12px #0000000c}
+h2{margin-top:0}
+label{display:block;font-weight:bold;margin:15px 0 7px}
+input,select{width:100%;padding:12px;border:1px solid #cbd3df;border-radius:7px;font-size:16px}
+button{padding:12px 18px;margin-top:14px;border:0;border-radius:7px;background:#1769aa;color:white;font-size:16px;cursor:pointer}
+button:disabled{opacity:.5;cursor:not-allowed}
+.secondary{background:#53657d}
+.status{background:#edf3fa;padding:12px;border-radius:7px;margin:12px 0}
+.hidden{display:none}
+.muted{color:#65748b}
+.goods{display:grid;grid-template-columns:repeat(auto-fit,minmax(130px,1fr));gap:10px}
+footer{text-align:center;padding:25px;color:#718096}
+</style>
+</head>
+
+<body>
+
+<header>
+<h1>Inflation Auction Game</h1>
+<p>Principles of Macroeconomics · ECON 2301</p>
+</header>
+
+<main>
+
+<section class="card">
+<h2>Welcome to the Auction!</h2>
+<div id="roundStatus" class="status">Connecting to game...</div>
+<p id="budgetText" class="muted">Your virtual budget will appear here.</p>
+<p id="gameMessage" class="muted">Wait for your instructor to open the auction.</p>
+</section>
+
+<section class="card" id="joinCard">
+<h2>Join the Game</h2>
+<label for="studentName">Enter your name</label>
+<input id="studentName" maxlength="40" placeholder="Your name">
+<button id="joinButton">Join Auction</button>
+</section>
+
+<section class="card hidden" id="bidCard">
+<h2>Place Your Bid</h2>
+<p class="muted">Choose one item and submit your sealed bid.</p>
+
+<label for="goodSelect">Select an item</label>
+<select id="goodSelect"></select>
+
+<label for="bidAmount">Your bid ($)</label>
+<input id="bidAmount" type="number" min="0" step="1" placeholder="Enter amount">
+
+<button id="bidButton">Submit Bid</button>
+<div id="bidMessage" class="status hidden"></div>
+</section>
+
+<section class="card hidden" id="studentStatusCard">
+<h2>Your Participation</h2>
+<div id="studentStatus" class="status"></div>
+</section>
+
+<section class="card">
+<h2>Instructor Dashboard</h2>
+<p class="muted">Instructor-only controls.</p>
+
+<button class="secondary" id="showInstructor">Instructor Login</button>
+
+<div id="instructorLogin" class="hidden">
+<label for="instructorPin">Instructor PIN</label>
+<input id="instructorPin" type="password" placeholder="Enter PIN">
+<button id="instructorButton">Login</button>
+<div id="instructorMessage" class="status hidden"></div>
+</div>
+
+<div id="instructorPanel" class="hidden">
+<h3>Game Controls</h3>
+<div id="instructorStatus" class="status"></div>
+<button id="startRoundButton">Start Round</button>
+<button class="secondary" id="closeRoundButton">Close Round</button>
+<button class="secondary" id="refreshResultsButton">Refresh Results</button>
+<pre id="results" style="white-space:pre-wrap;overflow-wrap:anywhere"></pre>
+</div>
+</section>
+
+</main>
+
+<footer>Inflation Auction Game · Economics Classroom Activity</footer>
+
+<script>
+/* SUPABASE CONFIGURATION */
+const SUPABASE_URL = "https://ubmazautxotaebousysc.supabase.co";
+const SUPABASE_KEY = "sb_publishable_EqWIEuoflBQ8_q-LycbVjA__OyySvHF";
+
+const FUNCTION_BASE = SUPABASE_URL + "/functions/v1/";
+
+let db = null;
+let currentRound = null;
+let currentGoods = [];
+let studentSession = null;
+let instructorSession = null;
+
+const $ = id => document.getElementById(id);
+
+function message(id,text){
+  $(id).textContent=text;
+  $(id).classList.remove("hidden");
+}
+
+async function callFunction(name,payload,token){
+  const response=await fetch(FUNCTION_BASE+name,{
+    method:"POST",
+    headers:{
+      "Content-Type":"application/json",
+      "apikey":SUPABASE_KEY,
+      "Authorization":"Bearer "+(token||SUPABASE_KEY)
+    },
+    body:JSON.stringify(payload||{})
+  });
+  const data=await response.json().catch(()=>({}));
+  if(!response.ok) throw new Error(data.error||"Request failed");
+  return data;
+}
+
+async function loadGame(){
+  try{
+    const {data:rounds,error:rError}=await db
+      .from("auction_rounds").select("*").order("round_number");
+    if(rError) throw rError;
+
+    const {data:goods,error:gError}=await db
+      .from("auction_goods").select("*").order("name");
+    if(gError) throw gError;
+
+    currentRound=rounds.find(r=>r.status==="open")||null;
+    currentGoods=goods||[];
+
+    if(currentRound){
+      $("roundStatus").textContent="Round "+currentRound.round_number+" is OPEN";
+      $("budgetText").textContent="Your budget: $"+currentRound.student_budget;
+      $("gameMessage").textContent="Select one item and submit your bid.";
+      $("bidCard").classList.toggle("hidden",!studentSession);
+    }else{
+      $("roundStatus").textContent="No auction round is currently open.";
+      $("budgetText").textContent="Wait for your instructor.";
+      $("bidCard").classList.add("hidden");
+    }
+
+    $("goodSelect").innerHTML="";
+    currentGoods.forEach(g=>{
+      const option=document.createElement("option");
+      option.value=g.id;
+      option.textContent=g.name;
+      $("goodSelect").appendChild(option);
+    });
+
+  }catch(e){
+    $("roundStatus").textContent="Could not connect to the game.";
+    console.error(e);
+  }
+}
+
+async function joinGame(){
+  const name=$("studentName").value.trim();
+  if(!name){alert("Enter your name.");return;}
+
+  $("joinButton").disabled=true;
+  try{
+    const result=await callFunction("student-register",{display_name:name});
+    studentSession=result;
+    sessionStorage.setItem("auctionStudentSession",JSON.stringify(result));
+    $("joinCard").classList.add("hidden");
+    $("studentStatusCard").classList.remove("hidden");
+    $("studentStatus").textContent="You have joined the auction.";
+    await loadGame();
+  }catch(e){
+    alert(e.message);
+  }finally{
+    $("joinButton").disabled=false;
+  }
+}
+
+async function submitBid(){
+  if(!studentSession||!currentRound){
+    alert("Join when a round is open.");
+    return;
+  }
+
+  const amount=Number($("bidAmount").value);
+  const goodId=$("goodSelect").value;
+
+  if(!Number.isInteger(amount)||amount<0||amount>currentRound.student_budget){
+    alert("Enter a valid bid within your budget.");
+    return;
+  }
+
+  $("bidButton").disabled=true;
+  try{
+    await callFunction("submit-bid",{
+      student_token:studentSession.access_token,
+      good_id:goodId,
+      bid_amount:amount
+    });
+    message("bidMessage","Your bid has been submitted!");
+    $("bidAmount").value="";
+    $("studentStatus").textContent="Bid submitted successfully.";
+  }catch(e){
+    message("bidMessage",e.message);
+  }finally{
+    $("bidButton").disabled=false;
+  }
+}
+
+async function instructorLogin(){
+  try{
+    const result=await callFunction("instructor-login",{
+      pin:$("instructorPin").value
+    });
+    instructorSession=result;
+    $("instructorLogin").classList.add("hidden");
+    $("instructorPanel").classList.remove("hidden");
+    $("instructorStatus").textContent="Instructor access granted.";
+    await refreshResults();
+  }catch(e){
+    message("instructorMessage",e.message);
+  }
+}
+
+async function instructorAction(action){
+  if(!instructorSession)return;
+  try{
+    await callFunction("instructor-control",{action},instructorSession.access_token);
+    await loadGame();
+    await refreshResults();
+  }catch(e){alert(e.message);}
+}
+
+async function refreshResults(){
+  if(!instructorSession)return;
+  try{
+    const data=await callFunction("instructor-results",{},instructorSession.access_token);
+    $("results").textContent=JSON.stringify(data,null,2);
+  }catch(e){$("results").textContent=e.message;}
+}
+
+$("joinButton").addEventListener("click",joinGame);
+$("bidButton").addEventListener("click",submitBid);
+$("showInstructor").addEventListener("click",()=>{
+  $("instructorLogin").classList.toggle("hidden");
+});
+$("instructorButton").addEventListener("click",instructorLogin);
+$("startRoundButton").addEventListener("click",()=>instructorAction("start"));
+$("closeRoundButton").addEventListener("click",()=>instructorAction("close"));
+$("refreshResultsButton").addEventListener("click",refreshResults);
+
+try{
+  studentSession=JSON.parse(sessionStorage.getItem("auctionStudentSession")||"null");
+}catch(e){studentSession=null;}
+
+if(SUPABASE_KEY.startsWith("sb_publishable_")){
+  db=window.supabase.createClient(SUPABASE_URL,SUPABASE_KEY);
+  loadGame();
+}else{
+  $("roundStatus").textContent="Supabase key has not been configured.";
+}
+</script>
+
+</body>
+</html>

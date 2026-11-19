@@ -255,10 +255,11 @@ footer {
 
       <button class="secondary" onclick="loadResults()">
         View Auction Results
-      
-     <button class="danger" onclick="resetGame()">
-  Reset Game
-</button>
+      </button>
+
+      <button class="danger" onclick="resetGame()">
+        Reset Game
+      </button>
 
       <div id="controlMessage" class="message"></div>
       <div id="resultsArea"></div>
@@ -619,7 +620,7 @@ async function controlRound(action) {
   }
 
   try {
-    const data = await callFunction("instructor-control", {
+    await callFunction("instructor-control", {
       pin: instructorPIN,
       round_id: round.id,
       action: action
@@ -633,6 +634,66 @@ async function controlRound(action) {
 
   } catch (error) {
     showMessage("controlMessage", error.message, true);
+  }
+}
+
+// --------------------------------------------------
+// RESET GAME
+// --------------------------------------------------
+
+async function resetGame() {
+  if (!instructorPIN) {
+    showMessage("controlMessage", "Please log in as instructor first.", true);
+    return;
+  }
+
+  const confirmation = confirm(
+    "WARNING: This will permanently delete all student registrations, bids, and saved auction results. All rounds will return to draft. Goods and budgets will remain. Continue?"
+  );
+
+  if (!confirmation) return;
+
+  const button = document.querySelector(
+    'button[onclick="resetGame()"]'
+  );
+
+  button.disabled = true;
+
+  try {
+    await callFunction("reset-game", {
+      pin: instructorPIN
+    });
+
+    submittedRounds.clear();
+
+    document.getElementById("resultsArea").innerHTML = "";
+
+    // Clear the student session on this browser.
+    sessionStorage.removeItem("auction_access_token");
+    sessionStorage.removeItem("auction_student_id");
+    sessionStorage.removeItem("auction_student_name");
+
+    student = null;
+
+    document.getElementById("studentSection").classList.add("hidden");
+    document.getElementById("joinSection").classList.remove("hidden");
+    document.getElementById("studentName").value = "";
+
+    await loadGameData();
+
+    showMessage(
+      "controlMessage",
+      "Game successfully reset! All rounds are now in draft status."
+    );
+
+  } catch (error) {
+    showMessage(
+      "controlMessage",
+      "Reset failed: " + error.message,
+      true
+    );
+  } finally {
+    button.disabled = false;
   }
 }
 
